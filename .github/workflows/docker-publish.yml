@@ -10,7 +10,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
-  IMAGE_NAME: privoce/vocechat-server
+  IMAGE_NAME: ${{ github.repository_owner }}/vocechat-server
 
 jobs:
   publish:
