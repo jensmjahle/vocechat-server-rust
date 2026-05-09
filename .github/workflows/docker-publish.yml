@@ -1,0 +1,38 @@
+name: Publish Docker Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --release --target x86_64-unknown-linux-musl
+      - name: Prepare Docker context
+        run: |
+          cp target/x86_64-unknown-linux-musl/release/vocechat-server build/docker/
+          cp -r config build/docker/
+      - name: Login to Docker Hub
+        run: printf '%s' "${{ secrets.DOCKER_PASSWORD }}" | docker login -u privoce --password-stdin
+      - name: Build and push image
+        working-directory: build/docker
+        run: |
+          docker build -t vocechat-server:latest .
+          docker tag vocechat-server:latest privoce/vocechat-server:latest
+          docker push privoce/vocechat-server:latest
