@@ -4,6 +4,7 @@ use anyhow::Result;
 use itertools::Itertools;
 use poem::{
     middleware::{Cors, TokioMetrics, Tracing},
+    web::Html,
     Endpoint, EndpointExt, Route,
 };
 use rc_msgdb::MsgDb;
@@ -160,6 +161,94 @@ pub async fn create_state(config_path: &Path, config: Arc<Config>) -> Result<Sta
     Ok(state)
 }
 
+fn current_build_sha() -> String {
+    std::env::var("GNOMCHAT_BUILD_SHA")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "dev".to_string())
+}
+
+pub(crate) fn render_welcome_screen(build_sha: &str) -> String {
+    let build_sha = if build_sha.trim().is_empty() {
+        "dev"
+    } else {
+        build_sha
+    };
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gnomchat</title>
+  <style>
+    :root {{
+      color-scheme: light;
+    }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f7fb;
+      color: #111827;
+    }}
+    main {{
+      width: min(640px, calc(100vw - 32px));
+      padding: 32px;
+      border: 1px solid #d6dde8;
+      border-radius: 12px;
+      background: #ffffff;
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 32px;
+      line-height: 1.1;
+    }}
+    p {{
+      margin: 0 0 20px;
+      line-height: 1.5;
+      color: #374151;
+    }}
+    dl {{
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 10px 16px;
+      margin: 0;
+    }}
+    dt {{
+      font-weight: 600;
+      color: #475569;
+    }}
+    dd {{
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: #0f172a;
+      word-break: break-all;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Gnomchat</h1>
+    <p>This page is a build marker. When the image updates, the SHA below changes.</p>
+    <dl>
+      <dt>Server version</dt>
+      <dd>{}</dd>
+      <dt>Build SHA</dt>
+      <dd>{}</dd>
+    </dl>
+  </main>
+</body>
+</html>"#,
+        env!("CARGO_PKG_VERSION"),
+        build_sha
+    )
+}
+
 async fn process_msg_updated(state: State, mut rx: mpsc::UnboundedReceiver<i64>) {
     while let Some(mid) = rx.recv().await {
         // process pinned messages
@@ -286,6 +375,10 @@ pub async fn create_endpoint(state: State) -> impl Endpoint {
     let metrics = TokioMetrics::new();
 
     Route::new()
+        .at(
+            "/welcome",
+            poem::endpoint::make_sync(|_| Html(render_welcome_screen(&current_build_sha()))),
+        )
         .nest(
             "/",
             poem::endpoint::StaticFilesEndpoint::new(state.config.system.wwwroot_dir())
@@ -315,6 +408,7 @@ mod tests {
         Server,
     };
     use reqwest::{Certificate, StatusCode};
+    use std::time::Duration;
 
     use super::*;
     use crate::{
@@ -373,5 +467,70 @@ mod tests {
         let url = format!("https://localhost:{}/health", port);
         let resp = client.get(url).send().await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_render_welcome_screen_contains_build_info() {
+        let html = render_welcome_screen("abc123");
+        assert!(html.contains("Gnomchat"));
+        assert!(html.contains("abc123"));
+        assert!(html.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[tokio::test]
+    async fn test_welcome_screen_endpoint() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            system: SystemConfig {
+                data_dir: tempdir.path().to_path_buf(),
+                token_expiry_seconds: 60 * 60,
+                refresh_token_expiry_seconds: 60 * 60,
+                magic_token_expiry_seconds: 60 * 15,
+                upload_avatar_limit: 1024 * 1024,
+                send_image_limit: 1024 * 1024,
+                upload_timeout_seconds: 300,
+                file_expiry_days: 30 * 3,
+                max_favorite_archives: 100,
+            },
+            network: NetworkConfig {
+                domain: Vec::new(),
+                bind: "127.0.0.1:0".to_string(),
+                tls: None,
+                frontend_url: "http://127.0.0.1:3000".to_string(),
+            },
+            template: Default::default(),
+            users: vec![],
+            webclient_url: None,
+            offical_fcm_config: Default::default(),
+        };
+        let state = create_state(tempdir.path(), Arc::new(config))
+            .await
+            .unwrap();
+        let ep = create_endpoint(state).await;
+        let acceptor = TcpListener::bind("127.0.0.1:0")
+            .into_acceptor()
+            .await
+            .unwrap();
+        let addr = acceptor.local_addr().remove(0);
+        tokio::spawn(async move {
+            Server::new_with_acceptor(acceptor).run(ep).await.unwrap();
+        });
+
+        let port = addr.as_socket_addr().unwrap().port();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://localhost:{}/welcome", port);
+        let mut body = None;
+        for _ in 0..20 {
+            match client.get(&url).send().await {
+                Ok(resp) if resp.status() == StatusCode::OK => {
+                    body = Some(resp.text().await.unwrap());
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        let body = body.expect("welcome screen did not become ready");
+        assert!(body.contains("Gnomchat"));
+        assert!(body.contains("Build SHA"));
     }
 }

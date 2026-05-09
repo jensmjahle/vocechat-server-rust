@@ -39,6 +39,7 @@ jobs:
         working-directory: build/docker
         run: |
           docker build \
+            --build-arg GNOMCHAT_BUILD_SHA="${GITHUB_SHA}" \
             -t "${REGISTRY}/${IMAGE_NAME}:latest" \
             -t "${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}" \
             .

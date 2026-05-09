@@ -1,0 +1,40 @@
+name: gnomchat
+
+services:
+  gnomchat:
+    image: ghcr.io/jensmjahle/vocechat-server:latest
+    pull_policy: always
+    container_name: gnomchat
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        sed -i 's#^webclient_url = .*#webclient_url = "https://github.com/Privoce/vocechat-web/releases/download/v0.3.0"#' config/config.toml
+        exec ./vocechat-server config/config.toml --network.frontend_url=
+    working_dir: /home/vocechat-server
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    volumes:
+      - /DATA/AppData/gnomchat/data:/home/vocechat-server/data
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: gnomchat-watchtower
+    restart: unless-stopped
+    command:
+      - --interval
+      - "60"
+      - --label-enable
+      - --cleanup
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+x-casaos:
+  main: gnomchat
+  title:
+    en_us: Gnomchat
+  scheme: http
+  port_map: "3001"
